@@ -302,6 +302,12 @@ def apply_metadata_ffmpeg(input_path: Path, output_path: Path, metadata: Dict[st
             if result.returncode == 0 and temp_output.exists():
                 temp_output.replace(output_path)
                 return True
+            
+            # Log error if metadata setting failed
+            if result.returncode != 0:
+                print(f"  - FFmpeg metadata setting failed (return code {result.returncode})")
+                if result.stderr:
+                    print(f"  - Error: {result.stderr[:200]}")
                     
     except Exception:
         pass
@@ -660,6 +666,8 @@ def process_audio_file(input_path: Path, output_path: Path, target_lufs: float =
                         check=True,
                         capture_output=True,
                         text=True,
+                        encoding='utf-8',
+                        errors='replace',
                         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
                     )
                     
@@ -683,10 +691,18 @@ def process_audio_file(input_path: Path, output_path: Path, target_lufs: float =
                             pass
                             
                 except subprocess.CalledProcessError as e:
-                    # FFmpeg failed - show error details
+                    # FFmpeg failed - show full error details for debugging
                     error_msg = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e))
-                    print(f"  - Warning: ffmpeg failed: {error_msg[:100] if error_msg else str(e)}")
+                    stdout_msg = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode('utf-8', errors='ignore') if e.stdout else '')
+                    
+                    print(f"  - Warning: FFmpeg failed with return code {e.returncode}")
+                    print(f"  - Command: {' '.join(ffmpeg_cmd)}")
+                    if error_msg:
+                        print(f"  - Error output: {error_msg}")
+                    if stdout_msg:
+                        print(f"  - Standard output: {stdout_msg[:200]}")
                     print(f"  - Falling back to pydub export (may not be exactly 24-bit)")
+                    
                     # Export directly to output
                     audio.export(str(output_path), format=output_format)
                     # Clean up temp file if it exists
@@ -728,16 +744,28 @@ def find_audio_files(directory: Path) -> List[Path]:
         directory: Directory to search
     
     Returns:
-        List of audio file paths
+        List of unique audio file paths (no duplicates)
     """
     audio_extensions = {'.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma', '.aiff', '.au'}
-    audio_files = []
+    # Use a set to track unique files (normalized paths to handle case-insensitive filesystems)
+    audio_files_set = set()
     
     for ext in audio_extensions:
-        audio_files.extend(directory.rglob(f'*{ext}'))
-        audio_files.extend(directory.rglob(f'*{ext.upper()}'))
+        # Search for lowercase extension
+        for file_path in directory.rglob(f'*{ext}'):
+            # Normalize path to handle case-insensitive filesystems (Windows)
+            normalized_path = file_path.resolve()
+            audio_files_set.add(normalized_path)
+        
+        # Search for uppercase extension (but normalize to avoid duplicates)
+        for file_path in directory.rglob(f'*{ext.upper()}'):
+            normalized_path = file_path.resolve()
+            audio_files_set.add(normalized_path)
     
-    return sorted(audio_files)
+    # Convert set to sorted list (set automatically handles duplicates)
+    audio_files = sorted(audio_files_set)
+    
+    return audio_files
 
 
 def main():
@@ -804,13 +832,25 @@ def main():
         print("No audio files found in the input directory.")
         sys.exit(1)
     
-    print(f"Found {len(audio_files)} audio file(s) to process.\n")
+    print(f"Found {len(audio_files)} unique audio file(s) to process.\n")
     
-    # Process each file
+    # Process each file (track processed files to avoid duplicates)
     successful = 0
     failed = 0
+    processed_files = set()  # Track processed files to prevent duplicates
     
     for audio_file in audio_files:
+        # Normalize path to handle case-insensitive filesystems
+        normalized_input = audio_file.resolve()
+        
+        # Skip if already processed
+        if normalized_input in processed_files:
+            print(f"Skipping duplicate: {audio_file.name} (already processed)")
+            continue
+        
+        # Mark as processed
+        processed_files.add(normalized_input)
+        
         # Calculate relative path to preserve directory structure
         relative_path = audio_file.relative_to(input_dir)
         output_path = output_dir / relative_path

@@ -259,27 +259,41 @@ class AudioProcessorGUI:
             self.process_button.config(text="Start Processing", state=tk.NORMAL)
             return
         
-        self.log(f"Found {len(audio_files)} audio file(s) to process.\n")
+        self.log(f"Found {len(audio_files)} unique audio file(s) to process.\n")
         self.update_status(f"Found {len(audio_files)} file(s)")
         
-        # Process each file
+        # Process each file (track processed files to avoid duplicates)
         successful = 0
         failed = 0
+        processed_files = set()  # Track processed files to prevent duplicates
+        processed_count = 0  # Count of actually processed files (excluding duplicates)
         
         for idx, audio_file in enumerate(audio_files):
             if not self.is_processing:
                 self.log("\nProcessing cancelled by user.")
                 break
             
+            # Normalize path to handle case-insensitive filesystems
+            normalized_input = audio_file.resolve()
+            
+            # Skip if already processed
+            if normalized_input in processed_files:
+                self.log(f"[{idx + 1}/{len(audio_files)}] Skipping duplicate: {audio_file.name}")
+                continue
+            
+            # Mark as processed
+            processed_files.add(normalized_input)
+            processed_count += 1
+            
             # Calculate relative path to preserve directory structure
             relative_path = audio_file.relative_to(input_path)
             output_file = output_path / relative_path
             
-            # Update progress
-            progress = ((idx + 1) / len(audio_files)) * 100
+            # Update progress based on actually processed files
+            progress = (processed_count / len(audio_files)) * 100
             self.update_progress(progress)
-            self.update_status(f"Processing {idx + 1}/{len(audio_files)}: {audio_file.name}")
-            self.log(f"[{idx + 1}/{len(audio_files)}] Processing: {audio_file.name}")
+            self.update_status(f"Processing {processed_count}/{len(audio_files)}: {audio_file.name}")
+            self.log(f"[{processed_count}/{len(audio_files)}] Processing: {audio_file.name}")
             
             if process_audio_file(audio_file, output_file, target_lufs):
                 successful += 1
