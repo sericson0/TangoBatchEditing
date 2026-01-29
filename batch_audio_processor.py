@@ -644,7 +644,9 @@ def process_audio_file(input_path: Path, output_path: Path, target_lufs: float =
                     if original_ext == '.mp3':
                         ffmpeg_cmd.extend(['-codec:a', 'libmp3lame', '-b:a', '320k'])
                     elif original_ext == '.flac':
-                        ffmpeg_cmd.extend(['-codec:a', 'flac', '-sample_fmt', 's24', '-compression_level', '12'])
+                        # FLAC doesn't support s24 directly - use s32 (32-bit) which FLAC supports natively
+                        # FLAC will encode at 24-bit precision internally
+                        ffmpeg_cmd.extend(['-codec:a', 'flac', '-sample_fmt', 's32', '-compression_level', '12'])
                     elif original_ext == '.m4a' or original_ext == '.aac':
                         ffmpeg_cmd.extend(['-codec:a', 'aac', '-b:a', '320k'])
                     elif original_ext == '.ogg':
