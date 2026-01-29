@@ -199,6 +199,133 @@ def extract_metadata_mutagen(input_path: Path) -> Dict[str, str]:
     return metadata
 
 
+def extract_album_art(input_path: Path) -> Optional[bytes]:
+    """
+    Extract album art/cover image from audio file.
+    
+    Args:
+        input_path: Path to input audio file
+    
+    Returns:
+        Album art image data as bytes, or None if not found
+    """
+    if not MUTAGEN_AVAILABLE:
+        return None
+    
+    try:
+        audio_file = MutagenFile(str(input_path))
+        if audio_file is None:
+            return None
+        
+        file_ext = input_path.suffix.lower()
+        
+        if file_ext == '.mp3':
+            # MP3 uses APIC frames in ID3 tags
+            from mutagen.id3 import APIC
+            if 'APIC:' in audio_file:
+                apic = audio_file['APIC:'].data
+                return apic
+        elif file_ext in ['.flac', '.ogg']:
+            # FLAC/OGG use PICTURE blocks in Vorbis comments
+            if hasattr(audio_file, 'pictures') and audio_file.pictures:
+                return audio_file.pictures[0].data
+            # Also try metadata key
+            for key in audio_file.keys():
+                if 'PICTURE' in key.upper() or 'COVER' in key.upper():
+                    try:
+                        pic_data = audio_file[key]
+                        if isinstance(pic_data, list) and len(pic_data) > 0:
+                            if hasattr(pic_data[0], 'data'):
+                                return pic_data[0].data
+                            elif isinstance(pic_data[0], bytes):
+                                return pic_data[0]
+                    except:
+                        pass
+        elif file_ext in ['.m4a', '.mp4']:
+            # M4A/MP4 use covr atoms
+            if 'covr' in audio_file:
+                covr = audio_file['covr']
+                if isinstance(covr, list) and len(covr) > 0:
+                    return covr[0]
+    except Exception:
+        pass
+    
+    return None
+
+
+def apply_album_art(output_path: Path, album_art: bytes) -> bool:
+    """
+    Apply album art/cover image to output file.
+    
+    Args:
+        output_path: Path to output audio file
+        album_art: Album art image data as bytes
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    if not MUTAGEN_AVAILABLE or not album_art:
+        return False
+    
+    try:
+        audio_file = MutagenFile(str(output_path))
+        if audio_file is None:
+            return False
+        
+        file_ext = output_path.suffix.lower()
+        
+        if file_ext == '.mp3':
+            # MP3 uses APIC frames
+            from mutagen.id3 import ID3, APIC, ID3NoHeaderError
+            try:
+                tags = ID3(str(output_path))
+            except ID3NoHeaderError:
+                tags = ID3()
+            
+            # Determine MIME type from image data
+            mime_type = 'image/jpeg'
+            if album_art.startswith(b'\x89PNG'):
+                mime_type = 'image/png'
+            elif album_art.startswith(b'GIF'):
+                mime_type = 'image/gif'
+            
+            tags['APIC'] = APIC(
+                encoding=3,
+                mime=mime_type,
+                type=3,  # Cover (front)
+                desc='Cover',
+                data=album_art
+            )
+            tags.save(str(output_path))
+            return True
+            
+        elif file_ext in ['.flac', '.ogg']:
+            # FLAC/OGG use PICTURE blocks
+            from mutagen.flac import Picture
+            picture = Picture()
+            picture.type = 3  # Cover (front)
+            picture.mime = 'image/jpeg'
+            if album_art.startswith(b'\x89PNG'):
+                picture.mime = 'image/png'
+            elif album_art.startswith(b'GIF'):
+                picture.mime = 'image/gif'
+            picture.data = album_art
+            audio_file.add_picture(picture)
+            audio_file.save()
+            return True
+            
+        elif file_ext in ['.m4a', '.mp4']:
+            # M4A/MP4 use covr atoms
+            audio_file['covr'] = [album_art]
+            audio_file.save()
+            return True
+            
+    except Exception:
+        pass
+    
+    return False
+
+
 def extract_metadata(input_path: Path) -> Dict[str, str]:
     """
     Extract metadata from audio file using available methods.
@@ -241,8 +368,11 @@ def apply_metadata_ffmpeg(input_path: Path, output_path: Path, metadata: Dict[st
             '-i', str(output_path),
             '-i', str(input_path),
             '-map', '0:a',  # Map audio from first input (output file)
+            '-map', '1:t?',  # Map all attachments (cover art, etc.) from input file if they exist
             '-map_metadata', '1',  # Copy all metadata from second input (input file)
             '-c:a', 'copy',  # Copy audio without re-encoding
+            '-c:v', 'copy',  # Copy any video/attachments without re-encoding
+            '-disposition:v', 'attached_pic',  # Mark attachments as album art
             '-y',
             str(temp_output)
         ]
@@ -534,10 +664,13 @@ def process_audio_file(input_path: Path, output_path: Path, target_lufs: float =
         if not input_path.exists():
             raise FileNotFoundError(f"Input file does not exist: {input_path}")
         
-        # Extract metadata from input file
+        # Extract metadata and album art from input file
         metadata = extract_metadata(input_path)
+        album_art = extract_album_art(input_path)
         if metadata:
             print(f"  - Extracted metadata: {', '.join(metadata.keys())[:50]}...")
+        if album_art:
+            print(f"  - Extracted album art ({len(album_art)} bytes)")
         
         # Check if FFmpeg is required for this file type
         # Most formats (FLAC, MP3, M4A, etc.) require FFmpeg
@@ -723,12 +856,19 @@ def process_audio_file(input_path: Path, output_path: Path, target_lufs: float =
             print(f"  - Note: FFmpeg not found in PATH, using pydub export (may not be exactly 24-bit)")
             audio.export(str(output_path), format=output_format)
         
-        # Apply metadata to output file
+        # Apply metadata and album art to output file
         if metadata:
             if apply_metadata(output_path, input_path, metadata):
                 print(f"  - Metadata preserved")
             else:
                 print(f"  - Warning: Could not preserve metadata")
+        
+        # Apply album art separately (FFmpeg might not preserve it properly)
+        if album_art:
+            if apply_album_art(output_path, album_art):
+                print(f"  - Album art preserved")
+            else:
+                print(f"  - Warning: Could not preserve album art")
         
         print(f"  ✓ Successfully processed: {output_path.name}\n")
         return True
